@@ -56,11 +56,7 @@ def _tensor_to_numpy(weight: torch.Tensor) -> np.ndarray:
     :param weight: Static embedding matrix
     :return: Detached CPU numpy matrix
     """
-    weight = weight.detach().cpu()
-    try:
-        return weight.numpy()
-    except RuntimeError:
-        return np.array(weight.tolist())
+    return weight.detach().cpu().numpy()
 
 
 def _parse_id_from_token(token: str) -> int | None:
@@ -89,12 +85,23 @@ def load_team_embeddings(
     The team id is parsed from meta["teams"]["token_to_id"] tokens such as
     "749:tottenham_hotspur_women". Special/non-entity tokens are skipped.
     """
+
+    # Run function to get the .pt checkpoint loaded into memory as a dictionary object
     ckpt = load_checkpoint(checkpoint_path)
+
+    # Run function to load and convert the metadata pickle file to a dictionary object
     meta = load_meta(meta_path)
 
+    # get the static embedding matrix from its key from the checkpoint dictionary
+    # then convert it to a numpy matrix
     team_weight = _tensor_to_numpy(_get_weight(ckpt, "team_embed.weight"))
+
+    # get the token to id value component of the metadata dict of dict of dict object
     team_token_to_id = meta["teams"]["token_to_id"]
 
+    # loop through each value of the token to id dict gathered above and parse the key column
+    # use this key's first value, if there, to be the key for the team_embeds dictionary, and match it
+    # with the same order of index that the embedding dictionary had
     team_embeds: EmbeddingDict = {}
     for token, index in team_token_to_id.items():
         team_id = _parse_id_from_token(token)
