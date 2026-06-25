@@ -1,11 +1,6 @@
 import json
-from pathlib import Path
 from typing import Any
-
-from embedding_audit.data.load_embeddings import (
-    _parse_id_from_token as parse_id_from_token,
-    load_meta,
-)
+from typing import Iterable
 
 AttributeDict = dict[int, str]
 
@@ -22,7 +17,7 @@ def load_index(index_path: str) -> dict[str, Any]:
         return json.load(f)
 
 
-def make_league_dict(team_ids: list[int], matches: list[dict[str, Any]]) -> AttributeDict:
+def make_league_dict(team_ids: Iterable[int], matches: list[dict[str, Any]]) -> AttributeDict:
     """
     Build {team_id: league} using the first match where each team appears.
     Basically loop through each match dict in the matches list of dicts, get the statsbomb ID numbers,
@@ -32,7 +27,7 @@ def make_league_dict(team_ids: list[int], matches: list[dict[str, Any]]) -> Attr
 
     This mirrors the existing helper in tools.py without importing that module's
     full analysis dependency stack.
-    :param team_ids: list of team_ids to check for in the matches
+    :param team_ids: Iterable of team_ids to check for in the matches
     :param matches: list of matches to check for in the matches
     :return dict[str, Any] of the Json data as a Python object. Key is the teamID and value is the league
     """
@@ -77,26 +72,22 @@ def league_to_sex(league: str) -> str:
     return "women" if league in womens else "men"
 
 
-def load_team_attributes(meta_path: str, index_path: str) -> dict[str, AttributeDict]:
+def load_team_attributes(index_path: str, team_ids: Iterable[int]) -> dict[str, AttributeDict]:
     """
     Return Q1 team attributes keyed by real StatsBomb team id.
 
     Static team embeddings have one vector per team, so this only returns labels
     that naturally map one team id to one value.
-    """
-    meta = load_meta(meta_path)
-    data_dict = load_index(index_path)
 
-    team_token_to_id = meta["teams"]["token_to_id"]
+    :param index_path: path to the JSON file
+    :param team_ids: Iterable of team_ids to check for in the matches
+    :return dict[str, dict[int, str]] of the Json data as a Python object
+    dicitonary of dictionaries where the key is the team ID and the value is the metadata like league or sex
+    """
+    data_dict = load_index(index_path)
     matches = data_dict["matches"]
 
-    all_team_ids = []
-    for token in team_token_to_id:
-        team_id = parse_id_from_token(str(token))
-        if team_id is not None:
-            all_team_ids.append(team_id)
-
-    team_to_league = make_league_dict(all_team_ids, matches)
+    team_to_league = make_league_dict(team_ids, matches)
     team_to_sex = {
         team_id: league_to_sex(league)
         for team_id, league in team_to_league.items()
@@ -108,17 +99,8 @@ def load_team_attributes(meta_path: str, index_path: str) -> dict[str, Attribute
     }
 
 
-def load_q1_attributes(
-    embedding_type: str,
-    meta_path: str | Path,
-    index_path: str | Path,
-    team_season_meta_path: str | Path | None = None,
-    player_to_team_path: str | Path | None = None,
-    player_to_position_path: str | Path | None = None,
-    position_categories_path: str | Path | None = None,
-    team_season_weight=None,
-    team_embedding_dict=None,
-) -> dict[str, AttributeDict]:
+def load_q1_attributes(embedding_type: str, index_path: str,
+                       ids: Iterable[int]) -> dict[str, AttributeDict]:
     """
     Load attribute dictionaries for static Q1 embedding audits.
 
@@ -126,6 +108,6 @@ def load_q1_attributes(
       - team: league, sex
     """
     if embedding_type == "team":
-        return load_team_attributes(meta_path, index_path)
+        return load_team_attributes(index_path, ids)
 
     raise NotImplementedError(f"Q1 attributes are not implemented for {embedding_type!r}.")

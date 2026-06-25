@@ -1,3 +1,7 @@
+from pathlib import Path
+
+import pytest
+
 from embedding_audit.data.load_embeddings import (
     load_checkpoint,
     load_meta,
@@ -12,6 +16,8 @@ META_PATH = "/projects/netsi_andlab/statsbomb/megatron/data/processed_fused/meta
 def test_load_team_embeddings_with_real_cluster_files():
     checkpoint_path = CHECKPOINT_PATH
     meta_path = META_PATH
+    if not Path(checkpoint_path).exists() or not Path(meta_path).exists():
+        pytest.skip("Cluster checkpoint/meta files are not available.")
 
     ckpt = load_checkpoint(checkpoint_path)
     meta = load_meta(meta_path)

@@ -75,10 +75,7 @@ def _parse_id_from_token(token: str) -> int | None:
         return None
 
 
-def load_team_embeddings(
-    checkpoint_path: str | Path,
-    meta_path: str | Path,
-) -> EmbeddingDict:
+def load_team_embeddings(checkpoint_path: str, meta_path: str) -> EmbeddingDict:
     """
     Return static team embeddings as {team_id: embedding_vector}.
 
