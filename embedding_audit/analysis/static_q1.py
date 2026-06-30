@@ -12,6 +12,7 @@ from sklearn.decomposition import PCA
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
 from statsmodels.discrete.discrete_model import MNLogit
 from statsmodels.stats.multitest import multipletests
@@ -459,12 +460,6 @@ def logistic_probe(
     # build the feature matrix for the linear probe through list comprehension of embedding vectors stacked
     # into rows
     feat_matx = np.stack([embeds_dict[item_id] for item_id in ids], axis=0).astype(np.float32)
-    # standardize each feature/direction through z-score normalization
-    scaler = StandardScaler()
-    # fit has it learn the mean and standard deviation of each embedding dimension
-    # transform applies the scaling
-    feat_matx_scaled = scaler.fit_transform(feat_matx)
-
     # create the logistics regression classifier
     #       max_iter uses the maximum optimization steps
     #       random_state makes shuffling/initial behavior reproducible
@@ -478,6 +473,8 @@ def logistic_probe(
         solver="lbfgs",
         C=1.0,
     )
+    # Put scaling inside the estimator so cross-validation fits the scaler only on each training fold.
+    probe_pipeline = make_pipeline(StandardScaler(), clf)
 
     # creates the cross-validation splitter, so each fold maintains normal class proportions
     # effective folds, shuffle, and random state all work with distribution while preserving for reproducibility
@@ -488,14 +485,15 @@ def logistic_probe(
     )
 
     # 1. Run to get fair prediction evaluation
-    # Run cross-validation and give one prediction for every item, y_pred_cv is an array of predicted int labels
-    y_pred_cv = cross_val_predict(clf, feat_matx_scaled, y, cv=cv)
+    # Run cross-validation and give one prediction for every item, y_pred_cv is an array of predicted int labels.
+    # The pipeline prevents feature preprocessing leakage by fitting StandardScaler inside each training fold.
+    y_pred_cv = cross_val_predict(probe_pipeline, feat_matx, y, cv=cv)
 
     # 2. Run across each fold manually to see if there is variance between folds
     # create a list to store the accuracy for each fold
     fold_accuracies = []
     # loop through each cv split of [training ids, value ids]
-    for train_idx, val_idx in cv.split(feat_matx_scaled, y):
+    for train_idx, val_idx in cv.split(feat_matx, y):
         # create a fresh logistic regression model for this fold, so eahc fold starts clean
         clf_fold = LogisticRegression(
             max_iter=max_iter,
@@ -504,16 +502,19 @@ def logistic_probe(
             solver="lbfgs",
             C=1.0,
         )
+        fold_pipeline = make_pipeline(StandardScaler(), clf_fold)
 
         # train the model only on the training rows
-        clf_fold.fit(feat_matx_scaled[train_idx], y[train_idx])
+        fold_pipeline.fit(feat_matx[train_idx], y[train_idx])
         # use the trained model to predict the validation rows, compare to their labels, and append accuracy score
         fold_accuracies.append(
-            accuracy_score(y[val_idx], clf_fold.predict(feat_matx_scaled[val_idx]))
+            accuracy_score(y[val_idx], fold_pipeline.predict(feat_matx[val_idx]))
         )
 
-    # Fit one final model on all data
-    clf.fit(feat_matx_scaled, y)
+    # Fit one final pipeline on all data for downstream inspection.
+    probe_pipeline.fit(feat_matx, y)
+    fitted_scaler = probe_pipeline.named_steps["standardscaler"]
+    fitted_clf = probe_pipeline.named_steps["logisticregression"]
     # convert the integer labels back to their strings for the actual and predicted labels
     y_true_labels = le.inverse_transform(y)
     y_pred_labels = le.inverse_transform(y_pred_cv)
@@ -530,8 +531,8 @@ def logistic_probe(
         )
 
     return {
-        "model": clf,
-        "scaler": scaler,
+        "model": probe_pipeline,
+        "scaler": fitted_scaler,
         "label_encoder": le,
         "ids": ids,
         "y_true": y_true_labels,
@@ -546,7 +547,7 @@ def logistic_probe(
         "class_names": list(le.classes_),
         "classification_report": classification_report(y_true_labels, y_pred_labels),
         "cv_fold_accuracies": fold_accuracies,
-        "coef": clf.coef_,
+        "coef": fitted_clf.coef_,
         "n_folds_used": effective_folds,
     }
 
