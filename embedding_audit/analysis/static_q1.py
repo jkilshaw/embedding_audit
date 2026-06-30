@@ -1,18 +1,42 @@
-import json
+"""Static Q1 analysis functions for id -> embedding dictionaries."""
+
 from collections import Counter
-from pathlib import Path
-from typing import Any, Hashable, Optional
+from collections.abc import Iterable
+from typing import Any, Optional
 
+import matplotlib
 import numpy as np
+import pandas as pd
+from sklearn.cross_decomposition import PLSRegression
+from sklearn.decomposition import PCA
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
+from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
+from statsmodels.discrete.discrete_model import MNLogit
+from statsmodels.stats.multitest import multipletests
 
+matplotlib.use("Agg")
+from matplotlib import patches as mpatches  # pylint: disable=wrong-import-position
+from matplotlib import pyplot as plt  # pylint: disable=wrong-import-position
 
 EmbeddingDict = dict[int, np.ndarray]
 AttributeDict = dict[int, str]
 RGBAColor = tuple[float, float, float, float]
 
 
-def align_static_audit_data(embeds_dict: EmbeddingDict, attr_dict: AttributeDict,
-                            min_samples: int = 5) -> tuple[EmbeddingDict, AttributeDict, dict[str, Any]]:
+def _sorted_ids(ids: Iterable[int]) -> list[int]:
+    """
+    Sort ids from embedding dictionary in order to keep results consistent
+    """
+    return sorted(ids)
+
+
+def align_static_audit_data(
+    embeds_dict: EmbeddingDict,
+    attr_dict: AttributeDict,
+    min_samples: int = 5,
+) -> tuple[EmbeddingDict, AttributeDict, dict[str, Any]]:
     """
     Align static embeddings and attributes by shared ids.
 
@@ -28,19 +52,18 @@ def align_static_audit_data(embeds_dict: EmbeddingDict, attr_dict: AttributeDict
     """
 
     # list comprehension to filter out team_ids that don't have corresponding metadata
-    ids = [item_id for item_id in embeds_dict if item_id in attr_dict and attr_dict[item_id] is not None]
+    ids = _sorted_ids(item_id for item_id in embeds_dict if item_id in attr_dict and attr_dict[item_id] is not None)
     # use counter to get counts of each categorical metadata entry
     label_counts = Counter(attr_dict[item_id] for item_id in ids)
-    # discard attribute category if it has less than 5 occurances
+    # Discard attribute categories with fewer than min_samples examples.
     kept_labels = {label for label, count in label_counts.items() if count >= min_samples}
-    # make a list of ids with low occurance ids filtered out
+    # make a list of ids with low occurrence ids filtered out
     kept_ids = [item_id for item_id in ids if attr_dict[item_id] in kept_labels]
 
-    # filter out the dicitonaries using only ids from the kept_ids list
+    # filter out the dictionaries using only ids from the kept_ids list
     filtered_embeds = {item_id: embeds_dict[item_id] for item_id in kept_ids}
     filtered_attrs = {item_id: attr_dict[item_id] for item_id in kept_ids}
     filtered_counts = Counter(filtered_attrs.values())
-
 
     # summary metadata dictionary that provides information on the filtering
     metadata = {
@@ -49,14 +72,19 @@ def align_static_audit_data(embeds_dict: EmbeddingDict, attr_dict: AttributeDict
         "n_classes": len(filtered_counts),
         "class_counts": dict(sorted(filtered_counts.items())),
         # sort and iterate through dropped labels
-        "dropped_class_counts": {label: count for label, count in sorted(label_counts.items())
-                                 if label not in kept_labels},
+        "dropped_class_counts": {
+            label: count
+            for label, count in sorted(label_counts.items())
+            if label not in kept_labels
+        },
     }
     return filtered_embeds, filtered_attrs, metadata
 
 
-def cos_sim_mat(embeds_dict: EmbeddingDict, attribute_dict: Optional[AttributeDict] = None) \
-        -> tuple[np.ndarray, list[Hashable], Optional[list[str]]]:
+def cos_sim_mat(
+    embeds_dict: EmbeddingDict,
+    attribute_dict: Optional[AttributeDict] = None,
+) -> tuple[np.ndarray, list[int], Optional[list[str]]]:
     """
     Compute pairwise cosine similarity for id -> vector dictionaries.
 
@@ -65,7 +93,7 @@ def cos_sim_mat(embeds_dict: EmbeddingDict, attribute_dict: Optional[AttributeDi
 
     :param embeds_dict: embedding dictionary with key as team_id and value as the vector
     :param attribute_dict: attribute dictionary with key as team id and value as the string classification
-    :return tuple[np.ndarray, list[Hashable], Optional[list[str]]]
+    :return tuple[np.ndarray, list[int], Optional[list[str]]]
     These are the N by N similarity matrix, the list of ids in the same order as the matrix which are also dictionary
     keys for other dictionaries and the list of attributes for the ids
     """
@@ -99,13 +127,6 @@ def _make_attribute_colormap(attributes: list[str]) -> tuple[dict[str, RGBAColor
     Dictionary of key string from attribute and value the cmap tuple
     List of strings of the attributes used in the respective order
     """
-    # import matplotlib locally in the function
-    import matplotlib
-
-    # use agg to prevent opening figures on the cluster and just save them
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     # get a sorted list of unique not none attributes
     unique_attrs = sorted(set(attr for attr in attributes if attr is not None))
     # generate a color palette based on the unique attributes length
@@ -118,18 +139,23 @@ def _make_attribute_colormap(attributes: list[str]) -> tuple[dict[str, RGBAColor
     return color_map, unique_attrs
 
 
-def plot_heatmap(sim_matrix: np.ndarray, ids: list[Hashable], attributes: Optional[list[str]] = None,
-    title: str = "Cosine Similarity Matrix", figsize: tuple[int, int] = (12, 10)):
+def plot_heatmap(
+    sim_matrix: np.ndarray,
+    ids: list[int],
+    attributes: Optional[list[str]] = None,
+    title: str = "Cosine Similarity Matrix",
+    figsize: tuple[int, int] = (12, 10),
+):
     """
     Plot a cosine similarity heatmap with optional attribute block boundaries.
+
+    :param sim_matrix: cosine similarity matrix
+    :param ids: list of ids in same order as the matrix
+    :param attributes: list of attribute strings in same order as the matrix
+    :param title: title of the plot
+    :param figsize: figure size of the plot
+    :return None
     """
-
-    # import matplot inside the function and use Agg for non-interactive plotting
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.patches as mpatches
-    import matplotlib.pyplot as plt
 
     # create the figure and one axis
     fig, ax = plt.subplots(figsize=figsize)
@@ -160,7 +186,11 @@ def plot_heatmap(sim_matrix: np.ndarray, ids: list[Hashable], attributes: Option
 
         # loop through the length of the attributes, and if an attribute is different than the next one, create
         # a boundary at i + .5, between the two different ones
-        boundaries = [i + 0.5 for i in range(len(attributes) - 1) if attributes[i] != attributes[i + 1]]
+        boundaries = [
+            i + 0.5
+            for i in range(len(attributes) - 1)
+            if attributes[i] != attributes[i + 1]
+        ]
 
         # for each of those boundaries, add a line between them to symbolize attribute blocks
         for boundary in boundaries:
@@ -168,12 +198,21 @@ def plot_heatmap(sim_matrix: np.ndarray, ids: list[Hashable], attributes: Option
             ax.axvline(boundary, color="black", linewidth=0.8, linestyle="--")
 
         # list comprehension for color patches for each attribute
-        handles = [mpatches.Patch(color=color_map[attr], label=attr) for attr in unique_attrs]
+        handles = [
+            mpatches.Patch(color=color_map[attr], label=attr)
+            for attr in unique_attrs
+        ]
 
         # add a legend to the plot with handle color patches as handles
         # place the legend relative to the axis box x=1.15 slightly to the right of the plot and y=1 at the top
         # in the upper left with fontsize 7 and opacity mostly opaque at .8
-        ax.legend(handles=handles, bbox_to_anchor=(1.15, 1), loc="upper left", fontsize=7, framealpha=0.8)
+        ax.legend(
+            handles=handles,
+            bbox_to_anchor=(1.15, 1),
+            loc="upper left",
+            fontsize=7,
+            framealpha=0.8,
+        )
 
     # set the title and adjust spacing so everything fits better
     ax.set_title(title)
@@ -183,18 +222,197 @@ def plot_heatmap(sim_matrix: np.ndarray, ids: list[Hashable], attributes: Option
     return fig
 
 
+def umap_embed(
+    embeds_dict: EmbeddingDict,
+    n_components: int = 2,
+    n_neighbors: int = 15,
+    min_dist: float = 0.1,
+    metric: str = "cosine",
+    random_state: int = 1337,
+) -> dict[str, Any]:
+    """
+    Perform UMAP dimensionality reduction on static embeddings.
+
+    :param embeds_dict: embedding dictionary with id keys and vector values
+    :param n_components: number of UMAP dimensions
+    :param n_neighbors: UMAP neighborhood size
+    :param min_dist: minimum distance between low-dimensional points
+    :param metric: distance metric for UMAP
+    :param random_state: random seed
+    :return dict: UMAP coordinates, ordered ids, and fitted UMAP model
+    """
+
+    # get the list of ids and build a feature matrix
+    ids = _sorted_ids(embeds_dict)
+    feat_matx = np.stack([embeds_dict[item_id] for item_id in ids], axis=0)
+
+    try:
+        import umap  # pylint: disable=import-outside-toplevel
+    except ImportError as err:
+        raise ImportError(
+            "umap_embed requires the optional dependency 'umap-learn'. "
+            "Install project requirements before running UMAP."
+        ) from err
+
+    # create model instance with parameterized values
+    umap_model = umap.UMAP(
+        n_components=n_components,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        random_state=random_state,
+    )
+
+    # generate a numpy array object of the umap_coordinates
+    umap_coords = umap_model.fit_transform(feat_matx)
+
+    # return the dictionary objects containing summary statistics
+    return {
+        "umap": umap_model,
+        "umap_coords": umap_coords,
+        "ids": ids,
+        "n_components": n_components,
+        "n_neighbors": n_neighbors,
+        "min_dist": min_dist,
+        "metric": metric,
+        "random_state": random_state,
+    }
+
+
+def plot_umap(
+    umap_coords: np.ndarray,
+    ids: list[int],
+    components: tuple[int, int] = (0, 1),
+    attribute_dict: Optional[AttributeDict] = None,
+    title: str = "UMAP",
+    figsize: tuple[int, int] = (9, 7),
+    label_points: bool = False,
+):
+    """
+    Plot UMAP coordinates as a scatter plot with optional attribute coloring.
+
+    :param umap_coords: UMAP coordinate matrix
+    :param ids: ordered ids matching UMAP coordinate rows
+    :param components: two UMAP dimensions to plot ( defaults to 1 dimension on x and 2 dimensions on y)
+    :param attribute_dict: optional id to attribute dictionary
+    :param title: plot title
+    :param figsize: figure size
+    :param label_points: whether to annotate point ids
+    :return: matplotlib Figure
+    """
+    # unpack x and y components
+    comp_x, comp_y = components
+    # get all coordinates for x and y directions from their columns and turn into 1D numpy arrays
+    xs = umap_coords[:, comp_x]
+    ys = umap_coords[:, comp_y]
+
+    # create the matplotlib feature with its axis
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # if labels were passed in, the function colors points by their respective labels
+    if attribute_dict is not None:
+        attributes = [attribute_dict.get(item_id) for item_id in ids]
+        present_attrs = [attr for attr in attributes if attr is not None]
+        color_map, unique_attrs = _make_attribute_colormap(present_attrs)
+
+        # collect points that are missing labels
+        grey_points = [(x_coord, y_coord) for x_coord, y_coord, attr in zip(xs, ys, attributes) if attr is None]
+        # collect points that are colored
+        colored_points = [(x_coord, y_coord, attr)for x_coord, y_coord, attr in zip(xs, ys, attributes)
+                          if attr is not None]
+
+        # plot grey points on the scatter plot
+        if grey_points:
+            grey_xs, grey_ys = zip(*grey_points)
+            ax.scatter(
+                grey_xs,
+                grey_ys,
+                c=["#cccccc"],  # color grey
+                s=20,           # point size
+                alpha=0.4,      # transparency
+                linewidths=0,
+                zorder=1,       # draw behind colored points
+                label="_nolegend_",
+            )
+
+        # plot colored points with their corresponding color
+        if colored_points:
+            colored_xs, colored_ys, colored_attrs = zip(*colored_points)
+            colors = [color_map[attr] for attr in colored_attrs]
+            ax.scatter(
+                colored_xs,
+                colored_ys,
+                c=colors,
+                s=40,
+                alpha=0.9,
+                linewidths=0,
+                zorder=2,
+            )
+
+        # create legend entries for each unique color/label type
+        handles = [mpatches.Patch(color=color_map[attr], label=attr) for attr in unique_attrs]
+
+        # Add the legend outside of the plot on the right
+        ax.legend(
+            handles=handles,
+            bbox_to_anchor=(1.01, 1),
+            loc="upper left",
+            fontsize=8,
+            framealpha=0.8,
+        )
+    # if there is no attribute dict, just plot everything with no color
+    else:
+        ax.scatter(xs, ys, s=40, alpha=0.8, linewidths=0)
+
+    # if requested, add labels to points in one default color
+    if label_points:
+        for x_coord, y_coord, item_id in zip(xs, ys, ids):
+            ax.annotate(
+                str(item_id),
+                (x_coord, y_coord),
+                fontsize=5,
+                alpha=0.7,
+                xytext=(3, 3),
+                textcoords="offset points",
+            )
+
+    # label axes, set the title, remove tick marks, and adjust the layout so things fit
+    ax.set_xlabel(f"UMAP dim {comp_x + 1}", fontsize=10)
+    ax.set_ylabel(f"UMAP dim {comp_y + 1}", fontsize=10)
+    ax.set_title(title)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    fig.tight_layout()
+    return fig
+
+
 def block_coherence(sim_matrix: np.ndarray, attrs: list[str]) -> float:
     """
     Return mean same-label similarity minus mean cross-label similarity.
-    """
-    attrs_arr = np.array(attrs)
-    same_label = attrs_arr[:, None] == attrs_arr[None, :]
-    upper = np.triu(np.ones(sim_matrix.shape, dtype=bool), k=1)
-    within = sim_matrix[same_label & upper]
-    cross = sim_matrix[~same_label & upper]
 
+    :param sim_matrix: cosine similarity matrix
+    :param attrs: list of attribute strings in same order as the matrix
+    :return float: block coherence score for embedding and attribute type
+    """
+
+    # convert the attribute list into a numpy array for numpy broadcasting
+    attrs_arr = np.array(attrs)
+    # create a boolean matrix for if attribute labels are the same or different
+    same_label = attrs_arr[:, None] == attrs_arr[None, :]
+    # create a boolean mask matrix for the upper triangle and exclude the diagonol as diagonal values are self-similar
+    # k = 1 mean 1 above the main diagonal
+    upper = np.triu(np.ones(sim_matrix.shape, dtype=bool), k=1)
+    # get matrix values that have the same label and are in the upper triangle in order to avoid duplicate counts
+    within_mask = np.logical_and(same_label, upper)
+    within = sim_matrix[within_mask]
+    # get the different label similarities
+    cross_mask = np.logical_and(np.logical_not(same_label), upper)
+    cross = sim_matrix[cross_mask]
+
+    # it cannot be run if there are no cross label or same label pairs
     if within.size == 0 or cross.size == 0:
         return float("nan")
+    # mean(within similarities) - mean(cross similarities) block coherence calculation
     return float(np.mean(within) - np.mean(cross))
 
 
@@ -207,31 +425,52 @@ def logistic_probe(
 ) -> dict[str, Any]:
     """
     Generic multinomial logistic regression probe for static embeddings.
+    :param embeds_dict: embedding dictionary
+    :param attr_dict: attribute dictionary
+    :param n_folds: number of folds
+    :param max_iter: maximum number of iterations
+    :param random_state: random seed
+    :return dict: probe results
     """
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
-    from sklearn.model_selection import StratifiedKFold, cross_val_predict
-    from sklearn.preprocessing import LabelEncoder, StandardScaler
-
-    ids = [item_id for item_id in embeds_dict if item_id in attr_dict]
+    # make a list of ids that overlap in both dicts
+    ids = _sorted_ids(item_id for item_id in embeds_dict if item_id in attr_dict)
     if not ids:
         raise ValueError("No overlap between embeds_dict and attr_dict keys.")
 
+    # get a list of the attributes in the same order as their ids
     labels = [attr_dict[item_id] for item_id in ids]
+    # create a label encoder to map string class labels to integer class ids.
     le = LabelEncoder()
+    # Fit the mapping on labels and transform labels into integer ids for sklearn.
     y = le.fit_transform(labels)
+
+    # count how many examples are in each encoded class bin
     class_counts = np.bincount(y)
+    # raise an error if it has less than 2 classes or bins
     if len(class_counts) < 2:
         raise ValueError("Logistic probe requires at least two classes.")
 
+    # make sure we do not use more folds than the smallest class size
     effective_folds = min(n_folds, int(class_counts.min()))
+    # need at least 2 folds for cross-validation
     if effective_folds < 2:
         raise ValueError("Logistic probe requires at least two samples per class.")
 
-    X = np.stack([embeds_dict[item_id] for item_id in ids], axis=0).astype(np.float32)
+    # build the feature matrix for the linear probe through list comprehension of embedding vectors stacked
+    # into rows
+    feat_matx = np.stack([embeds_dict[item_id] for item_id in ids], axis=0).astype(np.float32)
+    # standardize each feature/direction through z-score normalization
     scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X)
+    # fit has it learn the mean and standard deviation of each embedding dimension
+    # transform applies the scaling
+    feat_matx_scaled = scaler.fit_transform(feat_matx)
 
+    # create the logistics regression classifier
+    #       max_iter uses the maximum optimization steps
+    #       random_state makes shuffling/initial behavior reproducible
+    #       multinomial uses true multiclass logistic regression methods
+    #       l-bfgs is the optimization algorithm
+    #       1.0 is the regularization strength
     clf = LogisticRegression(
         max_iter=max_iter,
         random_state=random_state,
@@ -240,15 +479,24 @@ def logistic_probe(
         C=1.0,
     )
 
+    # creates the cross-validation splitter, so each fold maintains normal class proportions
+    # effective folds, shuffle, and random state all work with distribution while preserving for reproducibility
     cv = StratifiedKFold(
         n_splits=effective_folds,
         shuffle=True,
         random_state=random_state,
     )
-    y_pred_cv = cross_val_predict(clf, X_scaled, y, cv=cv)
 
+    # 1. Run to get fair prediction evaluation
+    # Run cross-validation and give one prediction for every item, y_pred_cv is an array of predicted int labels
+    y_pred_cv = cross_val_predict(clf, feat_matx_scaled, y, cv=cv)
+
+    # 2. Run across each fold manually to see if there is variance between folds
+    # create a list to store the accuracy for each fold
     fold_accuracies = []
-    for train_idx, val_idx in cv.split(X_scaled, y):
+    # loop through each cv split of [training ids, value ids]
+    for train_idx, val_idx in cv.split(feat_matx_scaled, y):
+        # create a fresh logistic regression model for this fold, so eahc fold starts clean
         clf_fold = LogisticRegression(
             max_iter=max_iter,
             random_state=random_state,
@@ -256,18 +504,26 @@ def logistic_probe(
             solver="lbfgs",
             C=1.0,
         )
-        clf_fold.fit(X_scaled[train_idx], y[train_idx])
+
+        # train the model only on the training rows
+        clf_fold.fit(feat_matx_scaled[train_idx], y[train_idx])
+        # use the trained model to predict the validation rows, compare to their labels, and append accuracy score
         fold_accuracies.append(
-            accuracy_score(y[val_idx], clf_fold.predict(X_scaled[val_idx]))
+            accuracy_score(y[val_idx], clf_fold.predict(feat_matx_scaled[val_idx]))
         )
 
-    clf.fit(X_scaled, y)
+    # Fit one final model on all data
+    clf.fit(feat_matx_scaled, y)
+    # convert the integer labels back to their strings for the actual and predicted labels
     y_true_labels = le.inverse_transform(y)
     y_pred_labels = le.inverse_transform(y_pred_cv)
 
+    # create a dictionary and loops through each class type
     per_class_accuracy = {}
     for label in le.classes_:
+        # creates a boolean mask if the class label matches the label we are evaluating
         mask = y_true_labels == label
+        # label the classes as keys with the accuracy score as their value
         per_class_accuracy[label] = accuracy_score(
             y_true_labels[mask],
             y_pred_labels[mask],
@@ -305,60 +561,86 @@ def pca_component_probe(
 ) -> dict[str, Any]:
     """
     Test whether PCA components encode attribute labels using MNLogit.
+    :param embeds_dict: embedding dictionary
+    :param attr_dict: attribute dictionary
+    :param n_components: number of PCA components
+    :param variance_threshold: variance threshold for PCA components
+    :param alpha: alpha parameter for PCA components significant cutoff for multiple-testing correction
+    :param random_state: random seed
+    :return dict: probe results
     """
-    import pandas as pd
-    from sklearn.decomposition import PCA
-    from sklearn.preprocessing import LabelEncoder, StandardScaler
-    from statsmodels.discrete.discrete_model import MNLogit
-    from statsmodels.stats.multitest import multipletests
 
-    ids = [item_id for item_id in embeds_dict if item_id in attr_dict]
+    # keep ids that exist in both dicitonaries
+    ids = _sorted_ids(item_id for item_id in embeds_dict if item_id in attr_dict)
     if not ids:
         raise ValueError("No overlap between embeds_dict and attr_dict keys.")
 
+    # convert string labels to integer class Ids
     labels = [attr_dict[item_id] for item_id in ids]
     le = LabelEncoder()
     y = le.fit_transform(labels)
+    # make sure there are at least 2 classes
     if len(le.classes_) < 2:
         raise ValueError("PCA component probe requires at least two classes.")
 
-    X = np.stack([embeds_dict[item_id] for item_id in ids], axis=0).astype(np.float64)
-    X_scaled = StandardScaler().fit_transform(X)
+    # build the feature matrix for PCA with one embedding vector per row
+    feat_matx = np.stack([embeds_dict[item_id] for item_id in ids], axis=0).astype(
+        np.float64
+    )
+    # scale and transform
+    feat_matx_scaled = StandardScaler().fit_transform(feat_matx)
 
-    max_components = min(len(ids), X_scaled.shape[1])
+    # find the maximum number of PCA components which cannot be more than the number of samples and dimensions
+    max_components = min(len(ids), feat_matx_scaled.shape[1])
+    # fit the pca with as many components as possible to inspect the full variance curve
     pca_full = PCA(n_components=max_components, random_state=random_state)
-    pca_full.fit(X_scaled)
+    pca_full.fit(feat_matx_scaled)
+    # compute the cumulative explained variance
     cumvar = np.cumsum(pca_full.explained_variance_ratio_)
 
+    # if user provides n_components use those, if not calculate how many are needed
     if n_components is not None:
         n_used = min(n_components, max_components)
     else:
         n_used = int(np.searchsorted(cumvar, variance_threshold) + 1)
         n_used = min(n_used, max_components)
 
+    # fits PCA again using only the selected number of components
     pca = PCA(n_components=n_used, random_state=random_state)
-    coords = pca.fit_transform(X_scaled)
+    # coords is the transformed data
+    # components are now represented by PCA component coordinates instead of original embeddings dimensions
+    pca_coords = pca.fit_transform(feat_matx_scaled)
 
-    X_mnlogit = np.hstack([np.ones((len(ids), 1)), coords])
-    model = MNLogit(y, X_mnlogit)
+    # Add an intercept column to the PCA coordinates. The first column will all be 1s
+    mnlogit_feat_matx = np.hstack([np.ones((len(ids), 1)), pca_coords])
+    # Fit multinomial logistic regression using PCA coordinates to predict the label
+    model = MNLogit(y, mnlogit_feat_matx)
     result = model.fit(method="lbfgs", maxiter=1000, disp=False)
 
+    # get p-values for PCA components and drop the intercept row
     pvals_per_component = result.pvalues[1:, :]
+    # for each PCA component, take the smallest p-value across class contrasts
+    # asks if this component is significantly associated with at least one class contrast
     pvals_min = pvals_per_component.min(axis=1)
+    # Apply Benjamini-Hochberg correction to see if they are significant after correction
     reject, pvals_corrected, _, _ = multipletests(
         pvals_min,
         alpha=alpha,
         method="fdr_bh",
     )
+    # build a list of indexes if they are significant based on p-val from reject above
     significant_components = [idx for idx, is_sig in enumerate(reject) if is_sig]
 
+    # get fitted coefficients for PCA components, excluding the intercept
     coefs = result.params[1:, :]
     max_coef_labels = []
+    # for each component, find which class contrast has the largest absolute coefficient
     for idx in range(n_used):
         class_idx = int(np.abs(coefs[idx]).argmax())
         label_idx = min(class_idx + 1, len(le.classes_) - 1)
         max_coef_labels.append(le.classes_[label_idx])
 
+    # build a dataframe table with one row per PCA component
     results_table = pd.DataFrame(
         {
             "component": range(n_used),
@@ -371,9 +653,10 @@ def pca_component_probe(
         }
     )
 
+    # return summary dictionary of all findings
     return {
         "pca": pca,
-        "pca_coords": coords,
+        "pca_coords": pca_coords,
         "n_components_used": n_used,
         "explained_variance": pca.explained_variance_ratio_,
         "cumulative_variance": np.cumsum(pca.explained_variance_ratio_),
@@ -396,28 +679,32 @@ def pls_probe(
     """
     Test whether PLS components encode attribute labels using MNLogit.
     """
-    import pandas as pd
-    from sklearn.cross_decomposition import PLSRegression
-    from sklearn.preprocessing import LabelEncoder, OneHotEncoder, StandardScaler
-    from statsmodels.discrete.discrete_model import MNLogit
-    from statsmodels.stats.multitest import multipletests
-
-    ids = [item_id for item_id in embeds_dict if item_id in attr_dict]
+    # keep only ids that exist in both dictionaries
+    ids = _sorted_ids(item_id for item_id in embeds_dict if item_id in attr_dict)
     if not ids:
         raise ValueError("No overlap between embeds_dict and attr_dict keys.")
 
+    # Build a label list in the same order as the ids
     labels = [attr_dict[item_id] for item_id in ids]
+    # convert the labels to numerical representations
     le = LabelEncoder()
     y_int = le.fit_transform(labels)
     n_classes = len(le.classes_)
+    # make sure that there are at least two classes
     if n_classes < 2:
         raise ValueError("PLS probe requires at least two classes.")
 
+    # build an embedding feature matrix
     X = np.stack([embeds_dict[item_id] for item_id in ids], axis=0).astype(np.float64)
+    # standardize the embedding directions and transform
     X_scaled = StandardScaler().fit_transform(X)
+    # convert integer labels into one-hot label matrix
     Y = OneHotEncoder(sparse_output=False).fit_transform(y_int.reshape(-1, 1))
 
+    # finds the maximum meaningful number of PLS components
     max_components = min(len(ids) - 1, n_classes - 1)
+
+    # logic for the amount of components to use and defensive programming
     if max_components < 1:
         raise ValueError("PLS probe requires at least one valid component.")
     if n_components is not None:
@@ -425,30 +712,43 @@ def pls_probe(
     else:
         n_used = max_components
 
+    # create the pls model to use and set scale to false as we manually scaled the feature vector before
     pls = PLSRegression(n_components=n_used, scale=False)
+    # fot PLS to find components of X that best relate to Y
     pls.fit(X_scaled, Y)
+    # get each item's coordinates/scores on the PLS components shape (N, n_used)
     coords = pls.transform(X_scaled)
 
+    # add intercept columns for statsmodels
     X_mnlogit = np.hstack([np.ones((len(ids), 1)), coords])
+    # fit multinomial logistic regression using PLS coordinates to predict labels
+    # mainly to get p-values for components
     model = MNLogit(y_int, X_mnlogit)
     result = model.fit(method="lbfgs", maxiter=1000, disp=False)
 
+    # get PLS components, excluding the intercept
     pvals_per_component = result.pvalues[1:, :]
+    # for each component, take the smallest p-value across class contrasts
     pvals_min = pvals_per_component.min(axis=1)
+    # Apply Benjamini-Hochberg correction to keep only confirmed singificant p-values
     reject, pvals_corrected, _, _ = multipletests(
         pvals_min,
         alpha=alpha,
         method="fdr_bh",
     )
-    significant_components = [idx for idx, is_sig in enumerate(reject) if is_sig]
+    # collect significant component indexes
+    significant_components = [i for i, is_sig in enumerate(reject) if is_sig]
 
+    # get component coefficients from MNLogit, excluding the intercept
     coefs = result.params[1:, :]
     max_coef_labels = []
+    # for each PLS component, find which class contrast has the largest absolute coefficient
     for idx in range(n_used):
         class_idx = int(np.abs(coefs[idx]).argmax())
         label_idx = min(class_idx + 1, len(le.classes_) - 1)
         max_coef_labels.append(le.classes_[label_idx])
 
+    # build one row per PLS component in this dataframe
     results_table = pd.DataFrame(
         {
             "component": range(n_used),
@@ -459,6 +759,7 @@ def pls_probe(
         }
     )
 
+    # return dictionary of summary statistics
     return {
         "pls": pls,
         "pls_coords": coords,
@@ -471,172 +772,3 @@ def pls_probe(
         "mnlogit_result": result,
         "random_state": random_state,
     }
-
-
-def _json_default(value: Any) -> Any:
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, Path):
-        return str(value)
-    return str(value)
-
-
-def _write_json(path: Path, data: dict[str, Any]) -> None:
-    path.write_text(json.dumps(data, indent=2, default=_json_default))
-
-
-def run_static_attribute_audit(
-    embeds_dict: EmbeddingDict,
-    attr_dict: AttributeDict,
-    embedding_type: str,
-    attribute: str,
-    output_dir: Path | str,
-    min_samples: int = 5,
-    n_folds: int = 5,
-    run_pca_components: bool = True,
-    run_pls: bool = False,
-    max_heatmap_items: int = 60,
-    pca_variance_threshold: float = 0.95,
-    random_state: int = 1337,
-) -> dict[str, Any]:
-    """
-    Run the static Q1 audit suite for one embedding type and one attribute.
-    """
-    output_dir = Path(output_dir)
-    figures_dir = output_dir / "figures"
-    metrics_dir = output_dir / "metrics"
-    figures_dir.mkdir(parents=True, exist_ok=True)
-    metrics_dir.mkdir(parents=True, exist_ok=True)
-
-    filtered_embeds, filtered_attrs, filter_meta = align_static_audit_data(
-        embeds_dict,
-        attr_dict,
-        min_samples=min_samples,
-    )
-    n_items = filter_meta["n_items"]
-    n_classes = filter_meta["n_classes"]
-    if n_items == 0:
-        raise ValueError(f"No items left after filtering {attribute!r}.")
-    if n_classes < 2:
-        raise ValueError(
-            f"Static Q1 audit for {attribute!r} requires at least two classes "
-            "after filtering."
-        )
-
-    result = {
-        "embedding_type": embedding_type,
-        "attribute": attribute,
-        "n_items": n_items,
-        "n_classes": n_classes,
-        "chance": 1.0 / n_classes,
-        "class_counts": filter_meta["class_counts"],
-        "dropped_class_counts": filter_meta["dropped_class_counts"],
-    }
-
-    lr_res = logistic_probe(
-        filtered_embeds,
-        filtered_attrs,
-        n_folds=n_folds,
-        random_state=random_state,
-    )
-    result.update(
-        {
-            "lr_accuracy": lr_res["overall_accuracy"],
-            "lr_cv_fold_accuracies": lr_res["cv_fold_accuracies"],
-            "lr_n_folds_used": lr_res["n_folds_used"],
-        }
-    )
-    (metrics_dir / f"classification_report_{embedding_type}_{attribute}.txt").write_text(
-        lr_res["classification_report"]
-    )
-    _write_json(
-        metrics_dir / f"logistic_probe_{embedding_type}_{attribute}.json",
-        {
-            "overall_accuracy": lr_res["overall_accuracy"],
-            "cv_fold_accuracies": lr_res["cv_fold_accuracies"],
-            "per_class_accuracy": lr_res["per_class_accuracy"],
-            "class_names": lr_res["class_names"],
-            "confusion_matrix": lr_res["confusion_matrix"],
-            "n_folds_used": lr_res["n_folds_used"],
-        },
-    )
-
-    sim_matrix, sorted_ids, sorted_attrs = cos_sim_mat(
-        filtered_embeds,
-        attribute_dict=filtered_attrs,
-    )
-    bc = block_coherence(sim_matrix, sorted_attrs)
-    result["block_coherence"] = bc
-    _write_json(
-        metrics_dir / f"block_coherence_{embedding_type}_{attribute}.json",
-        {"block_coherence": bc},
-    )
-
-    if n_items <= max_heatmap_items:
-        fig = plot_heatmap(
-            sim_matrix,
-            sorted_ids,
-            sorted_attrs,
-            title=f"{embedding_type}: cosine similarity by {attribute}",
-        )
-        fig.savefig(
-            figures_dir / f"heatmap_{embedding_type}_{attribute}.png",
-            dpi=200,
-            bbox_inches="tight",
-        )
-        import matplotlib.pyplot as plt
-
-        plt.close(fig)
-
-    if run_pca_components:
-        try:
-            pca_res = pca_component_probe(
-                filtered_embeds,
-                filtered_attrs,
-                variance_threshold=pca_variance_threshold,
-                random_state=random_state,
-            )
-            pca_res["results_table"].to_csv(
-                metrics_dir / f"pca_components_{embedding_type}_{attribute}.csv",
-                index=False,
-            )
-            result.update(
-                {
-                    "pca_n_significant": len(pca_res["significant_components"]),
-                    "pca_n_components": pca_res["n_components_used"],
-                }
-            )
-        except Exception as err:
-            result["pca_error"] = str(err)
-            result["pca_n_significant"] = None
-            result["pca_n_components"] = None
-
-    if run_pls:
-        try:
-            pls_res = pls_probe(
-                filtered_embeds,
-                filtered_attrs,
-                random_state=random_state,
-            )
-            pls_res["results_table"].to_csv(
-                metrics_dir / f"pls_components_{embedding_type}_{attribute}.csv",
-                index=False,
-            )
-            result.update(
-                {
-                    "pls_n_significant": len(pls_res["significant_components"]),
-                    "pls_n_components": pls_res["n_components_used"],
-                }
-            )
-        except Exception as err:
-            result["pls_error"] = str(err)
-            result["pls_n_significant"] = None
-            result["pls_n_components"] = None
-    else:
-        result["pls_n_significant"] = None
-        result["pls_n_components"] = None
-
-    _write_json(metrics_dir / f"summary_{embedding_type}_{attribute}.json", result)
-    return result
